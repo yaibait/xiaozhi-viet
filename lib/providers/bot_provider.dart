@@ -11,29 +11,15 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:uuid/uuid.dart';
 import 'dart:math';
 import 'dart:convert';
-import '../services/tts_playback_service.dart'; // ← ADD THIS
+import '../services/tts_playback_service.dart';
 
 /// Bot states
-enum BotState {
-  idle, // Đang đợi
-  listening, // Đang nghe user
-  thinking, // Đang xử lý
-  speaking, // Đang nói
-  error, // Lỗi
-}
+enum BotState { idle, listening, thinking, speaking, error }
 
 /// Bot emotions
-enum BotEmotion {
-  neutral, // Bình thường
-  happy, // Vui
-  thinking, // Đang suy nghĩ
-  listening, // Đang lắng nghe
-  speaking, // Đang nói
-  sad, // Buồn
-  error, // Lỗi
-}
+enum BotEmotion { neutral, happy, thinking, listening, speaking, sad, error }
 
-/// Main Bot Provider
+/// Main Bot Provider - FIXED VERSION
 class BotProvider extends ChangeNotifier {
   final Logger _logger = Logger();
 
@@ -43,27 +29,40 @@ class BotProvider extends ChangeNotifier {
   ActivationService? _activationService;
   final AudioService _audioService = AudioService();
   final VadService _vadService = VadService();
-  final TtsPlaybackService _ttsPlayback = TtsPlaybackService(); // ← ADD THIS
+  final TtsPlaybackService _ttsPlayback = TtsPlaybackService();
 
   // State
   BotState _state = BotState.idle;
+  BotState _stateBeforeDisconnect =
+      BotState.idle; // ✅ FIX 4: Lưu state trước disconnect
   BotEmotion _emotion = BotEmotion.neutral;
   bool _isActivated = false;
   bool _isConnected = false;
   String? _activationCode;
+
+  // ✅ FIX 1: Thêm field để lưu listening mode
+  ListeningMode _currentListeningMode = ListeningMode.autoStop;
+
+  // ✅ FIX 3: Thêm lock để tránh race condition
+  bool _isTransitioning = false;
+
+  // ✅ FIX 1: Thêm timer cho VAD timeout
+  Timer? _vadSpeechEndTimer;
 
   // Text
   String _currentTtsText = '';
   String _currentAsrText = '';
   final List<ChatMessage> _messages = [];
   final uuid = Uuid();
+
   // Subscriptions
   StreamSubscription? _ttsSubscription;
   StreamSubscription? _asrSubscription;
   StreamSubscription? _audioDataSubscription;
   StreamSubscription? _vadSubscription;
   StreamSubscription? _connectionStateSubscription;
-  StreamSubscription? _ttsPlaybackSubscription; // ← ADD THIS
+  StreamSubscription? _ttsPlaybackSubscription;
+  StreamSubscription? _recordingStateSubscription; // ✅ FIX 5: Thêm subscription
 
   // Getters
   BotState get state => _state;
@@ -81,11 +80,9 @@ class BotProvider extends ChangeNotifier {
   // Initialization
   // ============================================================================
 
-  /// Initialize bot
   Future<void> initialize({String? deviceId, String? clientId}) async {
     try {
       _logger.i('🤖 Initializing bot...');
-      // Lấy device_id từ SharedPreferences nếu có
       final prefs = await SharedPreferences.getInstance();
 
       final savedDeviceId = prefs.getString('device_id');
@@ -97,14 +94,14 @@ class BotProvider extends ChangeNotifier {
       final finalserialNumber =
           serial_number ?? serial_number ?? generateSerialFromUuid();
       final finalHmacKey = hmacKey ?? hmacKey ?? _generateHmacKey();
-      // Lưu lại nếu là lần đầu
+
       if (savedDeviceId == null) {
         await prefs.setString('device_id', finalDeviceId);
       }
       if (savedClientId == null) {
         await prefs.setString('client_id', finalClientId);
       }
-      // Create config
+
       _config = XiaozhiConfig(
         deviceId: finalDeviceId,
         clientId: finalClientId,
@@ -112,14 +109,11 @@ class BotProvider extends ChangeNotifier {
         hmacKey: finalHmacKey,
       );
 
-      // Create services
       _activationService = ActivationService(_config!);
       _wsService = XiaozhiWebSocketService(_config!);
 
-      // Setup callbacks
       _setupWebSocketCallbacks();
 
-      // Check activation
       _logger.i('📡 Checking activation status...');
       final response = await _activationService!.checkOtaStatus();
 
@@ -128,14 +122,13 @@ class BotProvider extends ChangeNotifier {
         _isActivated = false;
         _updateEmotion(BotEmotion.neutral);
         _logger.i('🔑 Need activation: $_activationCode');
-
-        // Start activation in background
         _startActivation();
       } else {
         _isActivated = true;
         _logger.i('✅ Already activated');
         await connect();
       }
+
       _audioService.init();
       notifyListeners();
     } catch (e) {
@@ -146,15 +139,13 @@ class BotProvider extends ChangeNotifier {
   }
 
   String generateSerialFromUuid() {
-    final u = uuid.v4().replaceAll('-', ''); // 32 hex chars
-    // lấy 8 hex đầu và 12 hex cuối (còn lại bỏ giữa)
+    final u = uuid.v4().replaceAll('-', '');
     final part1 = u.substring(0, 8);
     final part2 = u.substring(20, 32);
     return 'SN-${part1}-${part2}';
   }
 
   String _generateHmacKey() {
-    // Generate random 32-byte key
     final random = Random.secure();
     final bytes = List<int>.generate(32, (_) => random.nextInt(256));
     return base64Encode(bytes);
@@ -168,21 +159,15 @@ class BotProvider extends ChangeNotifier {
 
   String randomMac({bool locallyAdministered = true}) {
     final rnd = Random.secure();
-    // Sinh 6 byte
     final bytes = List<int>.generate(6, (_) => rnd.nextInt(256));
-
-    // Điều chỉnh byte đầu:
-    // - đảm bảo unicast: clear bit 0 (LSB)
-    // - nếu locallyAdministered true: set bit 1 (the "locally administered" bit)
     int first = bytes[0];
-    first = first & 0xFE; // clear multicast bit (LSB)
+    first = first & 0xFE;
     if (locallyAdministered) {
-      first = first | 0x02; // set locally-administered bit (bit 1)
+      first = first | 0x02;
     } else {
-      first = first & 0xFD; // clear locally-administered (optional)
+      first = first & 0xFD;
     }
     bytes[0] = first;
-
     return bytes.map(_toHex).join(':').toLowerCase();
   }
 
@@ -196,8 +181,13 @@ class BotProvider extends ChangeNotifier {
     _ttsSubscription = _wsService!.ttsTextStream.listen((text) {
       _currentTtsText = text;
       _addMessage(ChatMessage(text: text, isUser: false));
-      _updateState(BotState.speaking);
-      _updateEmotion(BotEmotion.speaking);
+
+      // ✅ FIX 2: CHỈ update state nếu không đang listening
+      if (_state != BotState.listening) {
+        _updateState(BotState.speaking);
+        _updateEmotion(BotEmotion.speaking);
+      }
+
       _logger.i('🔊 TTS: $text');
       notifyListeners();
     });
@@ -216,47 +206,87 @@ class BotProvider extends ChangeNotifier {
     ) {
       _isConnected = state == ConnectionState.connected;
       _logger.i('🔌 Connection state: $state');
+
+      // ✅ FIX 4: Xử lý connection loss
+      if (state == ConnectionState.disconnected && !_isConnected) {
+        _handleConnectionLoss();
+      }
+
       notifyListeners();
     });
 
     // Audio data stream
     _audioDataSubscription = _audioService.audioDataStream.listen((opusData) {
-      // Send to server
       _wsService?.sendAudio(opusData);
     });
-    // ✅ THÊM MỚI - TTS Audio stream (Server → Speaker)
+
+    // TTS Audio stream - ✅ CHUNKED STREAMING VERSION
     _wsService!.onIncomingAudio((opusData) {
       _logger.d('🔊 Received TTS audio: ${opusData.length} bytes');
 
-      // Buffer audio frame
-      _ttsPlayback.playOpusFrame(opusData);
+      // ✅ Add frame to streaming (sẽ tự động tạo chunk và play)
+      _ttsPlayback.addOpusFrame(opusData);
     });
 
-    // ✅ THÊM MỚI - TTS Playback state
+    // ✅ FIX 2: TTS Playback state - với state check
     _ttsPlaybackSubscription = _ttsPlayback.playbackStateStream.listen((
       isPlaying,
     ) {
       if (isPlaying) {
-        _updateState(BotState.speaking);
-        _updateEmotion(BotEmotion.speaking);
+        // CHỈ update nếu không đang listening
+        if (_state != BotState.listening) {
+          _updateState(BotState.speaking);
+          _updateEmotion(BotEmotion.speaking);
+        }
       } else {
-        // Playback finished
-        _updateState(BotState.idle);
-        _updateEmotion(BotEmotion.happy);
+        // CHỈ về idle nếu đang speaking
+        if (_state == BotState.speaking) {
+          _updateState(BotState.idle);
+          _updateEmotion(BotEmotion.happy);
+        }
       }
       notifyListeners();
     });
-    // VAD stream
+
+    // ✅ FIX 1: VAD stream - với mode check và timeout
     _vadSubscription = _vadService.vadEventStream.listen((event) {
       if (event == VadEvent.speechStart) {
         _logger.d('🎤 Speech started');
+
+        // Hủy timer nếu đang chờ
+        _vadSpeechEndTimer?.cancel();
+        _vadSpeechEndTimer = null;
+
         _updateEmotion(BotEmotion.listening);
       } else if (event == VadEvent.speechEnd) {
         _logger.d('🔇 Speech ended');
-        // Auto stop listening if in auto mode
-        if (_state == BotState.listening) {
-          stopListening();
+
+        // CHỈ auto-stop nếu mode là autoStop
+        if (_state == BotState.listening &&
+            _currentListeningMode == ListeningMode.autoStop) {
+          // Hủy timer cũ nếu có
+          _vadSpeechEndTimer?.cancel();
+
+          // Thêm timeout 1.5s để tránh dừng quá sớm
+          _vadSpeechEndTimer = Timer(Duration(milliseconds: 1500), () {
+            if (_state == BotState.listening) {
+              _logger.i('⏱️ VAD timeout - stopping listening');
+              stopListening();
+            }
+          });
         }
+      }
+    });
+
+    // ✅ FIX 5: Recording state stream - sync với bot state
+    _recordingStateSubscription = _audioService.recordingStateStream.listen((
+      isRecording,
+    ) {
+      if (!isRecording && _state == BotState.listening) {
+        _logger.w('⚠️ Recording stopped unexpectedly while in listening state');
+        _updateState(BotState.error);
+        _updateEmotion(BotEmotion.error);
+        notifyListeners();
       }
     });
   }
@@ -296,8 +326,16 @@ class BotProvider extends ChangeNotifier {
 
       if (success) {
         _isConnected = true;
-        _updateState(BotState.idle);
-        _updateEmotion(BotEmotion.happy);
+
+        // ✅ FIX 4: Restore state nếu đang listening trước khi mất kết nối
+        if (_stateBeforeDisconnect == BotState.listening) {
+          _logger.i('🔄 Restoring listening state after reconnection');
+          await startListening(mode: _currentListeningMode);
+        } else {
+          _updateState(BotState.idle);
+          _updateEmotion(BotEmotion.happy);
+        }
+
         _logger.i('✅ Connected!');
       } else {
         _logger.e('❌ Connection failed');
@@ -313,6 +351,17 @@ class BotProvider extends ChangeNotifier {
     }
   }
 
+  /// ✅ FIX 4: Handle connection loss
+  void _handleConnectionLoss() {
+    _logger.w('⚠️ Connection lost');
+    _stateBeforeDisconnect = _state;
+
+    // Dừng recording nếu đang listening
+    if (_state == BotState.listening) {
+      _audioService.stopRecording();
+    }
+  }
+
   /// Disconnect
   Future<void> disconnect() async {
     await _wsService?.disconnect();
@@ -325,17 +374,31 @@ class BotProvider extends ChangeNotifier {
   // Voice interaction
   // ============================================================================
 
-  /// Start listening
+  /// ✅ FIX 1 & 3: Start listening với lock và mode tracking
   Future<void> startListening({
     ListeningMode mode = ListeningMode.autoStop,
   }) async {
+    // ✅ FIX 3: Check lock
+    if (_isTransitioning) {
+      _logger.w('⚠️ Already transitioning state');
+      return;
+    }
+
     if (!_isConnected) {
       _logger.w('⚠️ Not connected');
       return;
     }
 
+    _isTransitioning = true; // Lock
+
     try {
-      _logger.i('🎤 Starting listening...');
+      _logger.i('🎤 Starting listening (mode: $mode)...');
+
+      // ✅ FIX AUDIO: Clear old audio buffer trước khi start listening mới
+      _ttsPlayback.startNewSession();
+
+      // ✅ FIX 1: Lưu listening mode
+      _currentListeningMode = mode;
 
       // Update state
       _updateState(BotState.listening);
@@ -352,13 +415,27 @@ class BotProvider extends ChangeNotifier {
     } catch (e) {
       _logger.e('❌ Error starting listening: $e');
       _updateState(BotState.error);
+    } finally {
+      _isTransitioning = false; // ✅ FIX 3: Unlock
     }
   }
 
-  /// Stop listening
+  /// ✅ STREAMING VERSION: Stop listening (đơn giản hơn nhiều!)
   Future<void> stopListening() async {
+    // ✅ FIX 3: Check lock
+    if (_isTransitioning) {
+      _logger.w('⚠️ Already transitioning state');
+      return;
+    }
+
+    _isTransitioning = true; // Lock
+
     try {
       _logger.i('🛑 Stopping listening...');
+
+      // Hủy VAD timer nếu có
+      _vadSpeechEndTimer?.cancel();
+      _vadSpeechEndTimer = null;
 
       // Stop audio recording
       await _audioService.stopRecording();
@@ -371,22 +448,27 @@ class BotProvider extends ChangeNotifier {
       _updateEmotion(BotEmotion.thinking);
 
       _logger.i('✅ Listening stopped');
-      // ✅ THÊM MỚI - Wait for TTS response và play
-      // Server sẽ gửi TTS audio frames về
-      // TtsPlaybackService sẽ buffer chúng
 
-      // Wait một chút để đảm bảo nhận đủ audio
+      // ✅ STREAMING: Không cần waitForAudio() nữa!
+      // Audio sẽ tự động stream và play từng chunk khi frames đến
+      // Chỉ cần đợi một chút để đảm bảo nhận frames đầu tiên
+      await Future.delayed(Duration(milliseconds: 200));
+
+      // Check stream status
+      final streamInfo = _ttsPlayback.getStreamInfo();
+      _logger.i('📊 Stream info: $streamInfo');
+
+      // Đợi thêm để nhận tất cả frames
       await Future.delayed(Duration(milliseconds: 500));
 
-      // Play buffered audio
-      final bufferInfo = _ttsPlayback.getBufferInfo();
-      if (bufferInfo['frames'] > 0) {
-        _logger.i('🔊 Playing TTS audio (${bufferInfo['frames']} frames)');
-        await _ttsPlayback.playBuffer();
-      }
+      // Flush remaining frames (phần cuối cùng)
+      await _ttsPlayback.flushRemainingFrames();
+
       notifyListeners();
     } catch (e) {
       _logger.e('❌ Error stopping listening: $e');
+    } finally {
+      _isTransitioning = false; // ✅ FIX 3: Unlock
     }
   }
 
@@ -409,13 +491,9 @@ class BotProvider extends ChangeNotifier {
     try {
       _logger.i('📤 Sending text: $text');
 
-      // Add to messages
       _addMessage(ChatMessage(text: text, isUser: true));
-
-      // Send to server
       await _wsService!.sendTextMessage(text);
 
-      // Update state
       _updateState(BotState.thinking);
       _updateEmotion(BotEmotion.thinking);
 
@@ -448,7 +526,7 @@ class BotProvider extends ChangeNotifier {
   void _addMessage(ChatMessage message) {
     _messages.add(message);
     if (_messages.length > 100) {
-      _messages.removeAt(0); // Keep only last 100 messages
+      _messages.removeAt(0);
     }
   }
 
@@ -464,17 +542,24 @@ class BotProvider extends ChangeNotifier {
 
   @override
   void dispose() {
+    // Cancel timers
+    _vadSpeechEndTimer?.cancel(); // ✅ FIX 1: Cancel VAD timer
+
+    // Cancel subscriptions
     _ttsSubscription?.cancel();
     _asrSubscription?.cancel();
     _audioDataSubscription?.cancel();
     _vadSubscription?.cancel();
     _connectionStateSubscription?.cancel();
-    _ttsPlaybackSubscription?.cancel(); // ← ADD THIS
+    _ttsPlaybackSubscription?.cancel();
+    _recordingStateSubscription?.cancel(); // ✅ FIX 5
 
+    // Dispose services
     _wsService?.dispose();
     _audioService.dispose();
     _vadService.dispose();
-    _ttsPlayback.dispose(); // ← ADD THIS
+    _ttsPlayback.dispose();
+
     super.dispose();
   }
 }
