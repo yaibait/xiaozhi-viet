@@ -34,6 +34,8 @@ class AudioService {
   // Streams
   final StreamController<Uint8List> _audioDataController =
       StreamController<Uint8List>.broadcast();
+  final StreamController<Int16List> _pcmDataController =
+      StreamController<Int16List>.broadcast(); // For VAD
   final StreamController<double> _volumeLevelController =
       StreamController<double>.broadcast();
   final StreamController<bool> _recordingStateController =
@@ -41,6 +43,7 @@ class AudioService {
 
   // Public streams
   Stream<Uint8List> get audioDataStream => _audioDataController.stream;
+  Stream<Int16List> get pcmDataStream => _pcmDataController.stream; // For VAD
   Stream<double> get volumeLevelStream => _volumeLevelController.stream;
   Stream<bool> get recordingStateStream => _recordingStateController.stream;
 
@@ -149,51 +152,36 @@ class AudioService {
       _recordingSubscription = stream.listen(
         (chunk) async {
           if (chunk.isNotEmpty && chunk.length % 2 == 0) {
+            // Convert to PCM Int16List for VAD
+            final Int16List pcmInt16 = Int16List.fromList(
+              List.generate(
+                chunk.length ~/ 2,
+                (i) => (chunk[i * 2]) | (chunk[i * 2 + 1] << 8),
+              ),
+            );
+
+            // Emit PCM data for VAD processing
+            _pcmDataController.add(pcmInt16);
+            // _logger.d('🎤 PCM emitted: ${pcmInt16.length} samples'); // Uncomment for debug
+
+            // Encode to Opus for server
             final opusData = await encodeToOpus(chunk);
             if (opusData != null) {
               _audioDataController.add(opusData);
             }
-            // Tính âm lượng (RMS)
-            // final volume = _calculateVolume(frame);
-            // _volumeLevelController.add(volume);
           }
-          // _audioDataController.add(opusData);
-          // try {
-          //   // Chuyển chunk sang Int16List
-          //   final pcm16 = Int16List.view(chunk.buffer);
-
-          //   // Thêm vào buffer
-          //   _pcmBuffer.addAll(pcm16);
-
-          //   // Xử lý khi đã đủ 1 frame Opus
-          //   while (_pcmBuffer.length >= OpusService.frameSize) {
-          //     // Lấy ra đúng 1 frame (960 mẫu)
-          //     final frame = Int16List.fromList(
-          //       _pcmBuffer.sublist(0, OpusService.frameSize),
-          //     );
-          //     _pcmBuffer.removeRange(0, OpusService.frameSize);
-
-          //     // Encode frame này
-          //     final opusData = _opusService.encode(frame);
-          //     if (opusData != null) {
-          //       _audioDataController.add(opusData);
-          //     }
-
-          //     // Tính âm lượng (RMS)
-          //     final volume = _calculateVolume(frame);
-          //     _volumeLevelController.add(volume);
-          //   }
-          // } catch (e) {
-          //   _logger.e('❌ Error encoding audio: $e');
-          // }
         },
         onError: (error) {
           _logger.e('❌ Recording error: $error');
+          _isRecording = false;
+          _recordingStateController.add(false);
           stopRecording();
         },
         onDone: () {
-          _logger.i('✅ Recording stream done');
-          _pcmBuffer.clear(); // dọn bộ đệm khi kết thúc
+          _logger.w('⚠️ Recording stream done (closed)');
+          _isRecording = false;
+          _recordingStateController.add(false);
+          _pcmBuffer.clear();
         },
       );
       _isRecording = true;
@@ -353,6 +341,7 @@ class AudioService {
     await _player.dispose();
 
     _audioDataController.close();
+    _pcmDataController.close();
     _volumeLevelController.close();
     _recordingStateController.close();
 

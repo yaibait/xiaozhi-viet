@@ -59,11 +59,17 @@ class BotProvider extends ChangeNotifier {
   StreamSubscription? _ttsSubscription;
   StreamSubscription? _asrSubscription;
   StreamSubscription? _audioDataSubscription;
+  StreamSubscription? _pcmDataSubscription; // For VAD
   StreamSubscription? _vadSubscription;
   StreamSubscription? _connectionStateSubscription;
   StreamSubscription? _ttsPlaybackSubscription;
   StreamSubscription? _recordingStateSubscription; // ✅ FIX 5: Thêm subscription
-
+  // Auto voice detection mode
+  bool _autoVoiceMode = false;
+  bool _isMonitoringVoice = false;
+  StreamSubscription? _autoVoiceSubscription;
+  Timer? _autoRestartTimer;
+  Timer? _autoListeningCheckTimer;
   // Getters
   BotState get state => _state;
   BotEmotion get emotion => _emotion;
@@ -75,7 +81,10 @@ class BotProvider extends ChangeNotifier {
   List<ChatMessage> get messages => List.unmodifiable(_messages);
   bool get isListening => _state == BotState.listening;
   bool get isSpeaking => _state == BotState.speaking;
-
+  bool get autoVoiceMode => _autoVoiceMode;
+  bool get isMonitoringVoice => _isMonitoringVoice;
+  VadService get vadService => _vadService;
+  AudioService get audioService => _audioService;
   // ============================================================================
   // Initialization
   // ============================================================================
@@ -217,8 +226,36 @@ class BotProvider extends ChangeNotifier {
 
     // Audio data stream
     _audioDataSubscription = _audioService.audioDataStream.listen((opusData) {
-      _wsService?.sendAudio(opusData);
+      // Chỉ gửi audio đến server khi đang listening
+      if (_state == BotState.listening) {
+        _wsService?.sendAudio(opusData);
+      }
     });
+
+    // PCM data stream for VAD processing
+    _pcmDataSubscription = _audioService.pcmDataStream.listen(
+      (pcmData) {
+        // Luôn luôn process VAD để phát hiện giọng nói
+        _vadService.processFrame(pcmData);
+      },
+      onError: (error) {
+        _logger.e('❌ PCM stream error: $error');
+      },
+      onDone: () {
+        _logger.w('⚠️ PCM stream closed');
+        // Nếu auto mode đang bật, restart recording
+        if (_autoVoiceMode && _isMonitoringVoice) {
+          _logger.i(
+            '🔄 PCM stream closed, restarting recording for auto mode...',
+          );
+          Future.delayed(Duration(milliseconds: 100), () async {
+            if (_autoVoiceMode && _isMonitoringVoice) {
+              await _audioService.startRecording();
+            }
+          });
+        }
+      },
+    );
 
     // TTS Audio stream - ✅ CHUNKED STREAMING VERSION
     _wsService!.onIncomingAudio((opusData) {
@@ -228,7 +265,7 @@ class BotProvider extends ChangeNotifier {
       _ttsPlayback.addOpusFrame(opusData);
     });
 
-    // ✅ FIX 2: TTS Playback state - với state check
+    // ✅ FIX 2: TTS Playback state - với state check và auto mode restart
     _ttsPlaybackSubscription = _ttsPlayback.playbackStateStream.listen((
       isPlaying,
     ) {
@@ -243,6 +280,14 @@ class BotProvider extends ChangeNotifier {
         if (_state == BotState.speaking) {
           _updateState(BotState.idle);
           _updateEmotion(BotEmotion.happy);
+
+          // ✅ FIX: Khi bot nói xong trong auto mode, reset VAD để sẵn sàng
+          if (_autoVoiceMode && _isMonitoringVoice) {
+            _logger.i(
+              '🔄 Auto mode: Bot finished speaking, ready for next input',
+            );
+            _vadService.reset();
+          }
         }
       }
       notifyListeners();
@@ -250,6 +295,14 @@ class BotProvider extends ChangeNotifier {
 
     // ✅ FIX 1: VAD stream - với mode check và timeout
     _vadSubscription = _vadService.vadEventStream.listen((event) {
+      _logger.d(
+        '🔊 VAD Event: $event (state: $_state, autoMode: $_autoVoiceMode)',
+      );
+      // ✅ CRITICAL: Skip nếu auto mode đang bật (auto listener sẽ xử lý)
+      if (_autoVoiceMode) {
+        _logger.d('⏭️ Auto mode active, skipping manual VAD handler');
+        return;
+      }
       if (event == VadEvent.speechStart) {
         _logger.d('🎤 Speech started');
 
@@ -537,6 +590,219 @@ class BotProvider extends ChangeNotifier {
   }
 
   // ============================================================================
+  // Auto Voice Mode
+  // ============================================================================
+
+  /// Enable auto voice mode - tự động phát hiện và bắt đầu lắng nghe
+  Future<void> enableAutoVoiceMode() async {
+    if (!_isConnected) {
+      _logger.w('⚠️ Not connected - cannot enable auto voice mode');
+      return;
+    }
+
+    if (_autoVoiceMode) {
+      _logger.w('⚠️ Auto voice mode already enabled');
+      return;
+    }
+
+    _logger.i('🤖 Enabling auto voice mode...');
+    _autoVoiceMode = true;
+
+    // Bắt đầu monitoring voice activity
+    await _startVoiceMonitoring();
+
+    notifyListeners();
+  }
+
+  /// Disable auto voice mode
+  Future<void> disableAutoVoiceMode() async {
+    if (!_autoVoiceMode) {
+      _logger.w('⚠️ Auto voice mode already disabled');
+      return;
+    }
+
+    _logger.i('🛑 Disabling auto voice mode...');
+    _autoVoiceMode = false;
+
+    // Dừng monitoring
+    await _stopVoiceMonitoring();
+
+    // Nếu đang listening thì stop
+    if (_state == BotState.listening) {
+      await stopListening();
+    }
+
+    notifyListeners();
+  }
+
+  /// Toggle auto voice mode
+  Future<void> toggleAutoVoiceMode() async {
+    if (_autoVoiceMode) {
+      await disableAutoVoiceMode();
+    } else {
+      await enableAutoVoiceMode();
+    }
+  }
+
+  /// Bắt đầu monitoring voice activity
+  Future<void> _startVoiceMonitoring() async {
+    if (_isMonitoringVoice) {
+      _logger.w('⚠️ Already monitoring voice');
+      return;
+    }
+
+    try {
+      _logger.i('👂 Starting voice monitoring...');
+      _isMonitoringVoice = true;
+
+      // Reset VAD service
+      _vadService.reset();
+
+      // Bắt đầu recording để monitor
+      final recordingStarted = await _audioService.startRecording();
+      if (!recordingStarted) {
+        _logger.e('❌ Failed to start recording for monitoring');
+        _isMonitoringVoice = false;
+        return;
+      }
+      _logger.i('✅ Recording started for monitoring');
+
+      // Subscribe to VAD events cho auto mode
+      _autoVoiceSubscription = _vadService.vadEventStream.listen(
+        (event) {
+          if (!_autoVoiceMode) {
+            _logger.d('⚠️ VAD event but auto mode disabled, ignoring');
+            return;
+          }
+
+          _logger.i('🔊 Auto VAD Event: $event (state: $_state)');
+
+          if (event == VadEvent.speechStart) {
+            _logger.i('🎤 Auto: Speech detected - starting listening');
+
+            // Tự động bắt đầu listening khi phát hiện giọng nói
+            if (_state == BotState.idle || _state == BotState.speaking) {
+              _autoStartListening();
+            } else {
+              _logger.d(
+                '⚠️ Auto: Not in idle/speaking state, current: $_state',
+              );
+            }
+          } else if (event == VadEvent.speechEnd) {
+            _logger.d('🔇 Auto: Speech ended');
+
+            // Trong auto mode, khi speech end thì auto stop và quay về monitoring
+            if (_state == BotState.listening) {
+              _autoStopListening();
+            } else {
+              _logger.d('⚠️ Auto: Not in listening state, current: $_state');
+            }
+          }
+        },
+        onError: (error) {
+          _logger.e('❌ Auto VAD subscription error: $error');
+        },
+        onDone: () {
+          _logger.w('⚠️ Auto VAD subscription closed');
+        },
+      );
+
+      _logger.i('✅ Voice monitoring started');
+      notifyListeners();
+    } catch (e) {
+      _logger.e('❌ Error starting voice monitoring: $e');
+      _isMonitoringVoice = false;
+    }
+  }
+
+  /// Dừng monitoring voice activity
+  Future<void> _stopVoiceMonitoring() async {
+    if (!_isMonitoringVoice) {
+      return;
+    }
+
+    try {
+      _logger.i('🛑 Stopping voice monitoring...');
+
+      // Cancel subscription
+      _autoVoiceSubscription?.cancel();
+      _autoVoiceSubscription = null;
+
+      // Cancel timers
+      _autoRestartTimer?.cancel();
+      _autoRestartTimer = null;
+      _autoListeningCheckTimer?.cancel();
+      _autoListeningCheckTimer = null;
+
+      // ✅ FIX: LUÔN stop recording khi tắt monitoring
+      await _audioService.stopRecording();
+
+      _isMonitoringVoice = false;
+      _logger.i('✅ Voice monitoring stopped');
+      notifyListeners();
+    } catch (e) {
+      _logger.e('❌ Error stopping voice monitoring: $e');
+    }
+  }
+
+  /// Auto start listening khi phát hiện giọng nói
+  Future<void> _autoStartListening() async {
+    try {
+      _logger.i('🤖 Auto starting listening...');
+
+      // Clear old audio buffer
+      _ttsPlayback.startNewSession();
+
+      // Update state
+      _updateState(BotState.listening);
+      _updateEmotion(BotEmotion.listening);
+
+      // Send start listening to server với auto mode
+      await _wsService!.sendStartListening(ListeningMode.autoStop);
+
+      // ✅ FIX: Recording đã chạy rồi từ monitoring, KHÔNG cần start lại
+      // Chỉ cần đảm bảo là nó vẫn đang chạy
+      if (!_audioService.isRecording) {
+        _logger.w('⚠️ Recording stopped unexpectedly, restarting...');
+        await _audioService.startRecording();
+      }
+
+      _logger.i('✅ Auto listening started');
+      notifyListeners();
+    } catch (e) {
+      _logger.e('❌ Error auto starting listening: $e');
+    }
+  }
+
+  /// Auto stop listening khi hết giọng nói
+  Future<void> _autoStopListening() async {
+    try {
+      _logger.i('🤖 Auto stopping listening...');
+
+      // Send stop listening to server
+      await _wsService!.sendStopListening();
+
+      // Update state
+      _updateState(BotState.thinking);
+      _updateEmotion(BotEmotion.thinking);
+
+      _logger.i('✅ Auto listening stopped');
+
+      // Wait for response
+      await Future.delayed(Duration(milliseconds: 200));
+
+      // Flush remaining frames
+      await _ttsPlayback.flushRemainingFrames();
+
+      // ✅ FIX: Đợi bot nói xong rồi mới ready cho input tiếp
+      // Thay vì dùng timer, listen vào TTS playback state
+      notifyListeners();
+    } catch (e) {
+      _logger.e('❌ Error auto stopping listening: $e');
+    }
+  }
+
+  // ============================================================================
   // Cleanup
   // ============================================================================
 
@@ -544,12 +810,16 @@ class BotProvider extends ChangeNotifier {
   void dispose() {
     // Cancel timers
     _vadSpeechEndTimer?.cancel(); // ✅ FIX 1: Cancel VAD timer
+    _autoRestartTimer?.cancel();
+    _autoListeningCheckTimer?.cancel();
 
     // Cancel subscriptions
     _ttsSubscription?.cancel();
     _asrSubscription?.cancel();
     _audioDataSubscription?.cancel();
+    _pcmDataSubscription?.cancel();
     _vadSubscription?.cancel();
+    _autoVoiceSubscription?.cancel();
     _connectionStateSubscription?.cancel();
     _ttsPlaybackSubscription?.cancel();
     _recordingStateSubscription?.cancel(); // ✅ FIX 5

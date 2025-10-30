@@ -6,6 +6,7 @@ import '../widgets/bot_avatar.dart';
 import '../widgets/voice_button.dart';
 import '../widgets/text_display.dart';
 import 'chat_screen.dart';
+import '../widgets/auto_mode_diagnostic.dart';
 
 /// Main bot screen - Màn hình chính với bot animation
 class BotScreen extends StatefulWidget {
@@ -84,7 +85,7 @@ class _BotScreenState extends State<BotScreen> with TickerProviderStateMixin {
                     SizedBox(height: 20),
                   ],
                 ),
-
+                DiagnosticToggleButton(),
                 // Activation overlay
                 if (!bot.isActivated) _buildActivationOverlay(bot),
               ],
@@ -115,9 +116,10 @@ class _BotScreenState extends State<BotScreen> with TickerProviderStateMixin {
       child: Row(
         mainAxisAlignment: MainAxisAlignment.spaceBetween,
         children: [
-          // Connection status
+          // Connection & Monitoring status
           Row(
             children: [
+              // Connection status
               Container(
                     width: 8,
                     height: 8,
@@ -135,6 +137,38 @@ class _BotScreenState extends State<BotScreen> with TickerProviderStateMixin {
                 bot.isConnected ? 'Connected' : 'Disconnected',
                 style: TextStyle(color: Colors.white70, fontSize: 12),
               ),
+
+              // Auto mode indicator
+              if (bot.autoVoiceMode) ...[
+                SizedBox(width: 16),
+                Container(
+                      padding: EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                      decoration: BoxDecoration(
+                        color: Colors.greenAccent.withOpacity(0.2),
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(color: Colors.greenAccent, width: 1),
+                      ),
+                      child: Row(
+                        children: [
+                          Icon(Icons.mic, color: Colors.greenAccent, size: 12),
+                          SizedBox(width: 4),
+                          Text(
+                            'Auto Mode',
+                            style: TextStyle(
+                              color: Colors.greenAccent,
+                              fontSize: 10,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                        ],
+                      ),
+                    )
+                    .animate(onPlay: (controller) => controller.repeat())
+                    .shimmer(
+                      duration: 2000.ms,
+                      color: Colors.greenAccent.withOpacity(0.3),
+                    ),
+              ],
             ],
           ),
 
@@ -209,6 +243,19 @@ class _BotScreenState extends State<BotScreen> with TickerProviderStateMixin {
     return Row(
       mainAxisAlignment: MainAxisAlignment.center,
       children: [
+        // Auto Voice Mode
+        _buildIconButton(
+          icon: bot.autoVoiceMode ? Icons.mic : Icons.mic_off,
+          label: 'Auto Mode',
+          color: bot.autoVoiceMode ? Colors.greenAccent : Colors.white54,
+          isActive: bot.autoVoiceMode,
+          onTap: () {
+            bot.toggleAutoVoiceMode();
+          },
+        ),
+
+        SizedBox(width: 40),
+
         // Settings
         _buildIconButton(
           icon: Icons.settings,
@@ -237,14 +284,33 @@ class _BotScreenState extends State<BotScreen> with TickerProviderStateMixin {
     required IconData icon,
     required String label,
     required VoidCallback onTap,
+    Color? color,
+    bool isActive = false,
   }) {
     return InkWell(
       onTap: onTap,
       child: Column(
         children: [
-          Icon(icon, color: Colors.white54, size: 24),
+          Container(
+            padding: EdgeInsets.all(isActive ? 12 : 0),
+            decoration: isActive
+                ? BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: Colors.greenAccent.withOpacity(0.2),
+                    border: Border.all(color: Colors.greenAccent, width: 2),
+                  )
+                : null,
+            child: Icon(icon, color: color ?? Colors.white54, size: 24),
+          ),
           SizedBox(height: 4),
-          Text(label, style: TextStyle(color: Colors.white54, fontSize: 12)),
+          Text(
+            label,
+            style: TextStyle(
+              color: color ?? Colors.white54,
+              fontSize: 12,
+              fontWeight: isActive ? FontWeight.bold : FontWeight.normal,
+            ),
+          ),
         ],
       ),
     );
