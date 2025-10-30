@@ -113,7 +113,7 @@ class ActivationService {
         headers: headers,
         body: jsonEncode(config.toOtaJson()),
       );
-
+      print(headers);
       _logger.i('OTA Response status: ${response.statusCode}');
       _logger.d('OTA Response body: ${response.body}');
 
