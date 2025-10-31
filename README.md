@@ -1,16 +1,28 @@
-# xiaozhi_v2
+# Xiaozhi.me Flutter Simulator
 
-A new Flutter project.
+Ứng dụng Flutter mô phỏng kết nối với **Xiaozhi.me**. Dự án này được tạo ra với mục đích **trải nghiệm bot Xiaozhi** và thử nghiệm các tính năng tương tác cơ bản.
 
-## Getting Started
+---
 
-This project is a starting point for a Flutter application.
+## 🚀 Tính năng đã hoàn thiện
 
-A few resources to get you started if this is your first Flutter project:
+- **Active device**: Kích hoạt thiết bị và mô phỏng quá trình đăng ký thiết bị với bot.
+- **Gửi âm thanh**: Cho phép người dùng gửi dữ liệu âm thanh tới bot.
+- **Phát âm thanh**: Nhận và phát âm thanh từ bot, hỗ trợ trải nghiệm nghe & nói cơ bản.
 
-- [Lab: Write your first Flutter app](https://docs.flutter.dev/get-started/codelab)
-- [Cookbook: Useful Flutter samples](https://docs.flutter.dev/cookbook)
+---
 
-For help getting started with Flutter development, view the
-[online documentation](https://docs.flutter.dev/), which offers tutorials,
-samples, guidance on mobile development, and a full API reference.
+## ⚙ Tính năng chưa hoàn thiện
+
+- **Lắng nghe realtime**: Chưa hỗ trợ thu âm và xử lý âm thanh theo thời gian thực (real-time).
+
+---
+
+## 🛠 Mục đích
+
+Ứng dụng này chủ yếu được dùng để:
+
+1. Thử nghiệm các tương tác cơ bản với bot Xiaozhi.
+2. Trải nghiệm các tính năng gửi và nhận âm thanh.
+3. Hiểu cơ chế hoạt động của bot Xiaozhi mà không cần môi trường chính thức.
+
