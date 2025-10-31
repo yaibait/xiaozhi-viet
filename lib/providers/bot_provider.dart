@@ -70,6 +70,7 @@ class BotProvider extends ChangeNotifier {
   StreamSubscription? _autoVoiceSubscription;
   Timer? _autoRestartTimer;
   Timer? _autoListeningCheckTimer;
+  Timer? _speakingTimeoutTimer; // ✅ NEW: Timer để check speaking timeout
   // Getters
   BotState get state => _state;
   BotEmotion get emotion => _emotion;
@@ -297,6 +298,13 @@ class BotProvider extends ChangeNotifier {
       if (_state != BotState.listening) {
         _updateState(BotState.speaking);
         _updateEmotion(BotEmotion.speaking);
+
+        // ✅ FIX MỚI: TẮT recording NGAY khi bot bắt đầu nói
+        // Không đợi TTS audio play để tránh echo/ngắt lời
+        if (_autoVoiceMode && _audioService.isRecording) {
+          _logger.i('🔇 Auto mode: Stopping recording - bot starting to speak');
+          _audioService.stopRecording();
+        }
       }
 
       _logger.i('🔊 TTS: $text');
@@ -337,8 +345,14 @@ class BotProvider extends ChangeNotifier {
     // PCM data stream for VAD processing
     _pcmDataSubscription = _audioService.pcmDataStream.listen(
       (pcmData) {
-        // Luôn luôn process VAD để phát hiện giọng nói
-        _vadService.processFrame(pcmData);
+        // ✅ FIX: CHỈ process VAD khi bot KHÔNG đang speaking
+        // Tránh detect giọng nói khi bot đang nói và ngắt lời bot
+        if (_state != BotState.speaking) {
+          _vadService.processFrame(pcmData);
+        } else {
+          // Bot đang nói, bỏ qua VAD processing
+          // _logger.d('⏭️ Skipping VAD - bot is speaking');
+        }
       },
       onError: (error) {
         _logger.e('❌ PCM stream error: $error');
@@ -376,20 +390,61 @@ class BotProvider extends ChangeNotifier {
         if (_state != BotState.listening) {
           _updateState(BotState.speaking);
           _updateEmotion(BotEmotion.speaking);
+
+          // ✅ FIX: TẮT recording khi bot đang nói để tránh echo
+          if (_autoVoiceMode && _audioService.isRecording) {
+            _logger.i('🔇 Auto mode: Pausing recording while bot speaks');
+            _audioService.stopRecording();
+          }
+
+          // ✅ NEW: Set timeout để force reset nếu bot speaking quá lâu (30s)
+          _speakingTimeoutTimer?.cancel();
+          _speakingTimeoutTimer = Timer(Duration(seconds: 30), () {
+            if (_state == BotState.speaking) {
+              _logger.w('⚠️ Speaking timeout - force reset to idle');
+              _updateState(BotState.idle);
+              _updateEmotion(BotEmotion.neutral);
+
+              if (_autoVoiceMode && _isMonitoringVoice) {
+                _vadService.reset();
+                Future.delayed(Duration(milliseconds: 200), () async {
+                  if (_autoVoiceMode && !_audioService.isRecording) {
+                    await _audioService.startRecording();
+                  }
+                });
+              }
+              notifyListeners();
+            }
+          });
         }
       } else {
-        // CHỈ về idle nếu đang speaking
+        // Cancel timeout timer
+        _speakingTimeoutTimer?.cancel();
+        _speakingTimeoutTimer = null;
+
+        // CHỉ về idle nếu đang speaking
         if (_state == BotState.speaking) {
           _updateState(BotState.idle);
           _updateEmotion(BotEmotion.happy);
 
-          // ✅ FIX: Khi bot nói xong trong auto mode, reset VAD để sẵn sàng
+          // ✅ FIX: Khi bot nói xong trong auto mode, BẬT LẠI recording
           if (_autoVoiceMode && _isMonitoringVoice) {
             _logger.i(
-              '🔄 Auto mode: Bot finished speaking, ready for next input',
+              '🔄 Auto mode: Bot finished speaking, restarting recording',
             );
+
+            // Reset VAD để sẵn sàng
             _vadService.reset();
-            _autoStartListening();
+
+            // Bật lại recording sau một chút delay
+            Future.delayed(Duration(milliseconds: 300), () async {
+              if (_autoVoiceMode &&
+                  _isMonitoringVoice &&
+                  !_audioService.isRecording) {
+                _logger.i('🎤 Auto mode: Restarting recording for next input');
+                await _audioService.startRecording();
+              }
+            });
           }
         }
       }
@@ -737,6 +792,12 @@ class BotProvider extends ChangeNotifier {
       await stopListening();
     }
 
+    // ✅ FIX: Reset về idle state khi tắt auto mode
+    if (_state != BotState.speaking) {
+      _updateState(BotState.idle);
+      _updateEmotion(BotEmotion.neutral);
+    }
+
     notifyListeners();
   }
 
@@ -759,6 +820,13 @@ class BotProvider extends ChangeNotifier {
     try {
       _logger.i('👂 Starting voice monitoring...');
       _isMonitoringVoice = true;
+
+      // ✅ FIX: Đảm bảo bot ở idle state khi bắt đầu monitoring
+      if (_state != BotState.listening && _state != BotState.speaking) {
+        _logger.i('🔄 Setting bot to idle state for auto mode');
+        _updateState(BotState.idle);
+        _updateEmotion(BotEmotion.happy);
+      }
 
       // Reset VAD service
       _vadService.reset();
@@ -783,22 +851,63 @@ class BotProvider extends ChangeNotifier {
           _logger.i('🔊 Auto VAD Event: $event (state: $_state)');
 
           if (event == VadEvent.speechStart) {
-            _logger.i('🎤 Auto: Speech detected - starting listening');
+            _logger.i('🎤 Auto: Speech detected');
 
             // Tự động bắt đầu listening khi phát hiện giọng nói
-            if (_state == BotState.idle || _state == BotState.speaking) {
+            // CHỈ nếu bot đang idle (không listening, không speaking)
+            if (_state == BotState.idle) {
+              _logger.i('✅ Auto: Starting listening from idle state');
               _autoStartListening();
+            } else if (_state == BotState.speaking) {
+              _logger.d('⏭️ Auto: Bot is speaking, will wait for finish');
+              // Không làm gì, đợi bot nói xong sẽ tự restart recording
             } else {
-              _logger.d(
-                '⚠️ Auto: Not in idle/speaking state, current: $_state',
-              );
+              _logger.d('⚠️ Auto: Not in idle state, current: $_state');
             }
           } else if (event == VadEvent.speechEnd) {
             _logger.d('🔇 Auto: Speech ended');
 
-            // Trong auto mode, khi speech end thì auto stop và quay về monitoring
+            // Trong auto mode, khi speech end thì auto stop
             if (_state == BotState.listening) {
+              _logger.i('✅ Auto: Stopping listening');
               _autoStopListening();
+            } else if (_state == BotState.thinking) {
+              // ✅ FIX: Nếu đang thinking mà có speechEnd (im lặng ban đầu)
+              // thì reset về idle để sẵn sàng
+              _logger.i('🔄 Auto: In thinking state, resetting to idle');
+              _updateState(BotState.idle);
+              _updateEmotion(BotEmotion.happy);
+              notifyListeners();
+            } else if (_state == BotState.speaking) {
+              // ✅ FIX MỚI: Nếu bot đang speaking mà detect speechEnd
+              // có thể là bot đã nói xong nhưng TTS chưa emit completed
+              // Đợi một chút rồi check lại
+              _logger.i(
+                '⏱️ Auto: Bot speaking, user silent - checking if bot finished',
+              );
+
+              Future.delayed(Duration(milliseconds: 500), () {
+                // Nếu vẫn đang speaking sau 500ms và không có audio
+                // thì force về idle
+                if (_state == BotState.speaking && !_ttsPlayback.isPlaying) {
+                  _logger.i(
+                    '🔄 Auto: Force reset to idle - bot seems finished',
+                  );
+                  _updateState(BotState.idle);
+                  _updateEmotion(BotEmotion.happy);
+
+                  // Restart recording cho auto mode
+                  if (_autoVoiceMode && _isMonitoringVoice) {
+                    _vadService.reset();
+                    Future.delayed(Duration(milliseconds: 200), () async {
+                      if (_autoVoiceMode && !_audioService.isRecording) {
+                        await _audioService.startRecording();
+                      }
+                    });
+                  }
+                  notifyListeners();
+                }
+              });
             } else {
               _logger.d('⚠️ Auto: Not in listening state, current: $_state');
             }
@@ -855,8 +964,14 @@ class BotProvider extends ChangeNotifier {
     try {
       _logger.i('🤖 Auto starting listening...');
 
-      // Clear old audio buffer
-      _ttsPlayback.startNewSession();
+      // ✅ FIX: CHỈ clear audio buffer nếu bot KHÔNG đang speaking
+      // Nếu đang speaking thì KHÔNG clear để tránh ngắt lời bot
+      if (_state != BotState.speaking && !_ttsPlayback.isPlaying) {
+        _logger.d('🔄 Clearing old audio buffer');
+        _ttsPlayback.startNewSession();
+      } else {
+        _logger.d('⏭️ Bot is speaking, keeping audio buffer');
+      }
 
       // Update state
       _updateState(BotState.listening);
@@ -865,17 +980,26 @@ class BotProvider extends ChangeNotifier {
       // Send start listening to server với auto mode
       await _wsService!.sendStartListening(ListeningMode.autoStop);
 
-      // ✅ FIX: Recording đã chạy rồi từ monitoring, KHÔNG cần start lại
-      // Chỉ cần đảm bảo là nó vẫn đang chạy
+      // ✅ FIX: Đảm bảo recording đang chạy
       if (!_audioService.isRecording) {
-        _logger.w('⚠️ Recording stopped unexpectedly, restarting...');
-        await _audioService.startRecording();
+        _logger.i('🎤 Starting recording for listening...');
+        final started = await _audioService.startRecording();
+        if (!started) {
+          _logger.e('❌ Failed to start recording');
+          _updateState(BotState.error);
+          _updateEmotion(BotEmotion.error);
+          return;
+        }
+      } else {
+        _logger.d('✅ Recording already active');
       }
 
       _logger.i('✅ Auto listening started');
       notifyListeners();
     } catch (e) {
       _logger.e('❌ Error auto starting listening: $e');
+      _updateState(BotState.error);
+      _updateEmotion(BotEmotion.error);
     }
   }
 
@@ -887,11 +1011,15 @@ class BotProvider extends ChangeNotifier {
       // Send stop listening to server
       await _wsService!.sendStopListening();
 
-      // Update state
+      // Update state to thinking
       _updateState(BotState.thinking);
       _updateEmotion(BotEmotion.thinking);
 
-      _logger.i('✅ Auto listening stopped');
+      _logger.i('✅ Auto listening stopped, waiting for bot response');
+
+      // ✅ QUAN TRỌNG: KHÔNG tắt recording ở đây
+      // Recording sẽ tiếp tục chạy để sẵn sàng cho input tiếp theo
+      // CHỈ tắt khi bot bắt đầu nói (trong TTS playback handler)
 
       // Wait for response
       await Future.delayed(Duration(milliseconds: 200));
@@ -899,8 +1027,6 @@ class BotProvider extends ChangeNotifier {
       // Flush remaining frames
       await _ttsPlayback.flushRemainingFrames();
 
-      // ✅ FIX: Đợi bot nói xong rồi mới ready cho input tiếp
-      // Thay vì dùng timer, listen vào TTS playback state
       notifyListeners();
     } catch (e) {
       _logger.e('❌ Error auto stopping listening: $e');
@@ -917,6 +1043,7 @@ class BotProvider extends ChangeNotifier {
     _vadSpeechEndTimer?.cancel(); // ✅ FIX 1: Cancel VAD timer
     _autoRestartTimer?.cancel();
     _autoListeningCheckTimer?.cancel();
+    _speakingTimeoutTimer?.cancel(); // ✅ NEW: Cancel speaking timeout
 
     // Cancel subscriptions
     _ttsSubscription?.cancel();
