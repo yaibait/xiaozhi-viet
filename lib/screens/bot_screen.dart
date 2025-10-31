@@ -2,11 +2,11 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:flutter_animate/flutter_animate.dart';
 import '../providers/bot_provider.dart';
+import '../providers/settings_provider.dart';
 import '../widgets/bot_avatar.dart';
 import '../widgets/voice_button.dart';
 import '../widgets/text_display.dart';
 import 'chat_screen.dart';
-import '../widgets/auto_mode_diagnostic.dart';
 
 /// Main bot screen - Màn hình chính với bot animation
 class BotScreen extends StatefulWidget {
@@ -46,52 +46,224 @@ class _BotScreenState extends State<BotScreen> with TickerProviderStateMixin {
 
   @override
   Widget build(BuildContext context) {
+    final screenHeight = MediaQuery.of(context).size.height;
+    final screenWidth = MediaQuery.of(context).size.width;
+    final isSmallScreen = screenHeight < 700;
+
     return Scaffold(
       backgroundColor: Color(0xFF0A0E27),
       body: SafeArea(
-        child: Consumer<BotProvider>(
-          builder: (context, bot, child) {
-            return Stack(
-              children: [
-                // Background gradient
-                _buildBackground(),
+        child: Consumer2<BotProvider, SettingsProvider>(
+          builder: (context, bot, settings, child) {
+            return GestureDetector(
+              // ✅ Detect user interactions for auto-dim
+              onTap: () => settings.onUserInteraction(),
+              onPanUpdate: (_) => settings.onUserInteraction(),
+              behavior: HitTestBehavior.translucent,
+              child: Stack(
+                children: [
+                  // Background gradient
+                  _buildBackground(),
 
-                // Main content
-                Column(
-                  children: [
-                    // Top bar
-                    _buildTopBar(context, bot),
+                  // Main content - sử dụng Column với Flexible thay vì Spacer
+                  Column(
+                    children: [
+                      // Top bar - fixed height
+                      _buildTopBar(context, bot),
 
-                    Spacer(flex: 1),
+                      // Demo mode banner - fixed height
+                      if (bot.isDemoMode) _buildDemoBanner(context, bot),
 
-                    // Bot avatar
-                    _buildBotAvatar(bot),
+                      // Flexible space top
+                      Flexible(
+                        flex: isSmallScreen ? 1 : 2,
+                        child: SizedBox.shrink(),
+                      ),
 
-                    SizedBox(height: 40),
+                      // Bot avatar - dynamic size based on screen
+                      _buildBotAvatar(bot, isSmallScreen),
 
-                    // Text display
-                    _buildTextDisplay(bot),
+                      SizedBox(height: isSmallScreen ? 16 : 32),
 
-                    Spacer(flex: 2),
+                      // Text display - constrained height
+                      _buildTextDisplay(bot, isSmallScreen),
 
-                    // Voice button
-                    _buildVoiceButton(bot),
+                      // Flexible space bottom (larger)
+                      Flexible(
+                        flex: isSmallScreen ? 2 : 3,
+                        child: SizedBox.shrink(),
+                      ),
 
-                    SizedBox(height: 40),
+                      // Voice button
+                      _buildVoiceButton(bot, settings),
 
-                    // Bottom buttons
-                    _buildBottomButtons(bot),
+                      SizedBox(height: isSmallScreen ? 16 : 32),
 
-                    SizedBox(height: 20),
-                  ],
-                ),
-                DiagnosticToggleButton(),
-                // Activation overlay
-                if (!bot.isActivated) _buildActivationOverlay(bot),
-              ],
+                      // Bottom buttons
+                      _buildBottomButtons(bot),
+
+                      SizedBox(height: isSmallScreen ? 16 : 20),
+                    ],
+                  ),
+
+                  // Activation overlay
+                  if (!bot.isActivated) _buildActivationOverlay(bot),
+                ],
+              ),
             );
           },
         ),
+      ),
+    );
+  }
+
+  /// Demo mode banner
+  Widget _buildDemoBanner(BuildContext context, BotProvider bot) {
+    final isSmallScreen = MediaQuery.of(context).size.height < 700;
+
+    return Container(
+          margin: EdgeInsets.symmetric(
+            horizontal: isSmallScreen ? 12 : 16,
+            vertical: isSmallScreen ? 6 : 8,
+          ),
+          padding: EdgeInsets.all(isSmallScreen ? 10 : 12),
+          decoration: BoxDecoration(
+            gradient: LinearGradient(
+              colors: [Colors.blue.shade700, Colors.blue.shade900],
+            ),
+            borderRadius: BorderRadius.circular(isSmallScreen ? 10 : 12),
+            border: Border.all(color: Colors.blue.shade300, width: 2),
+          ),
+          child: Row(
+            children: [
+              Icon(
+                Icons.info_outline,
+                color: Colors.white,
+                size: isSmallScreen ? 18 : 20,
+              ),
+              SizedBox(width: isSmallScreen ? 10 : 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Đang dùng Bot Demo',
+                      style: TextStyle(
+                        color: Colors.white,
+                        fontWeight: FontWeight.bold,
+                        fontSize: isSmallScreen ? 13 : 14,
+                      ),
+                    ),
+                    if (!isSmallScreen) ...[
+                      SizedBox(height: 4),
+                      Text(
+                        'Nâng cấp lên Bot của bạn để có trải nghiệm tốt hơn',
+                        style: TextStyle(color: Colors.white70, fontSize: 12),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+              SizedBox(width: 8),
+              InkWell(
+                onTap: () {
+                  _showUpgradeDialog(context, bot);
+                },
+                child: Container(
+                  padding: EdgeInsets.symmetric(
+                    horizontal: isSmallScreen ? 10 : 12,
+                    vertical: isSmallScreen ? 5 : 6,
+                  ),
+                  decoration: BoxDecoration(
+                    color: Colors.white,
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: Text(
+                    'Nâng cấp',
+                    style: TextStyle(
+                      color: Colors.blue.shade700,
+                      fontWeight: FontWeight.bold,
+                      fontSize: isSmallScreen ? 11 : 12,
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        )
+        .animate(onPlay: (controller) => controller.repeat())
+        .shimmer(duration: 2000.ms, color: Colors.white.withOpacity(0.2));
+  }
+
+  /// Show upgrade dialog
+  void _showUpgradeDialog(BuildContext context, BotProvider bot) {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: Color(0xFF1A1F3A),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        title: Row(
+          children: [
+            Icon(Icons.rocket_launch, color: Colors.blue),
+            SizedBox(width: 12),
+            Text(
+              'Nâng cấp lên Bot của bạn',
+              style: TextStyle(color: Colors.white, fontSize: 18),
+            ),
+          ],
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'Với Bot của bạn, bạn sẽ có:',
+              style: TextStyle(color: Colors.white70, fontSize: 14),
+            ),
+            SizedBox(height: 12),
+            _buildBenefit('Tùy chỉnh hoàn toàn theo ý bạn'),
+            _buildBenefit('Giọng nói và tính cách riêng'),
+            _buildBenefit('Lưu trữ lịch sử hội thoại'),
+            _buildBenefit('Không giới hạn sử dụng'),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: Text('Để sau', style: TextStyle(color: Colors.white54)),
+          ),
+          ElevatedButton(
+            onPressed: () async {
+              Navigator.pop(context);
+              await bot.switchToMyBot();
+            },
+            style: ElevatedButton.styleFrom(
+              backgroundColor: Colors.blue,
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(12),
+              ),
+            ),
+            child: Text('Nâng cấp ngay'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildBenefit(String text) {
+    return Padding(
+      padding: EdgeInsets.symmetric(vertical: 4),
+      child: Row(
+        children: [
+          Icon(Icons.check_circle, color: Colors.green, size: 16),
+          SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              text,
+              style: TextStyle(color: Colors.white, fontSize: 13),
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -109,7 +281,7 @@ class _BotScreenState extends State<BotScreen> with TickerProviderStateMixin {
     );
   }
 
-  /// Top bar với connection status
+  /// Top bar với connection status và Settings button
   Widget _buildTopBar(BuildContext context, BotProvider bot) {
     return Padding(
       padding: EdgeInsets.all(16),
@@ -172,15 +344,27 @@ class _BotScreenState extends State<BotScreen> with TickerProviderStateMixin {
             ],
           ),
 
-          // Chat button
-          IconButton(
-            icon: Icon(Icons.chat_bubble_outline, color: Colors.white70),
-            onPressed: () {
-              Navigator.push(
-                context,
-                MaterialPageRoute(builder: (context) => ChatScreen()),
-              );
-            },
+          // Right buttons
+          Row(
+            children: [
+              // Settings button
+              IconButton(
+                icon: Icon(Icons.settings, color: Colors.white70),
+                onPressed: () {
+                  Navigator.pushNamed(context, '/settings');
+                },
+              ),
+              // Chat button
+              IconButton(
+                icon: Icon(Icons.chat_bubble_outline, color: Colors.white70),
+                onPressed: () {
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(builder: (context) => ChatScreen()),
+                  );
+                },
+              ),
+            ],
           ),
         ],
       ),
@@ -188,7 +372,10 @@ class _BotScreenState extends State<BotScreen> with TickerProviderStateMixin {
   }
 
   /// Bot avatar với animations
-  Widget _buildBotAvatar(BotProvider bot) {
+  Widget _buildBotAvatar(BotProvider bot, bool isSmallScreen) {
+    // Tính toán kích thước avatar dựa trên cả chiều cao và chiều rộng
+    double avatarSize = isSmallScreen ? 120.0 : 180.0;
+
     return AnimatedBuilder(
       animation: Listenable.merge([_pulseController, _bounceController]),
       builder: (context, child) {
@@ -206,18 +393,21 @@ class _BotScreenState extends State<BotScreen> with TickerProviderStateMixin {
           scale: scale,
           child: Opacity(
             opacity: opacity,
-            child: BotAvatar(emotion: bot.emotion, size: 200),
+            child: BotAvatar(emotion: bot.emotion, size: avatarSize),
           ),
         );
       },
     );
   }
 
-  /// Text display area
-  Widget _buildTextDisplay(BotProvider bot) {
+  /// Text display
+  Widget _buildTextDisplay(BotProvider bot, bool isSmallScreen) {
     return Container(
-      height: 120,
-      padding: EdgeInsets.symmetric(horizontal: 32),
+      constraints: BoxConstraints(
+        minHeight: isSmallScreen ? 60 : 80,
+        maxHeight: isSmallScreen ? 100 : 120,
+      ),
+      padding: EdgeInsets.symmetric(horizontal: isSmallScreen ? 20 : 32),
       child: TextDisplay(
         text: bot.isSpeaking ? bot.currentTtsText : bot.currentAsrText,
         isUser: !bot.isSpeaking,
@@ -225,175 +415,198 @@ class _BotScreenState extends State<BotScreen> with TickerProviderStateMixin {
     );
   }
 
-  /// Voice button
-  Widget _buildVoiceButton(BotProvider bot) {
-    return VoiceButton(
-      isListening: bot.isListening,
-      isConnected: bot.isConnected,
+  /// Voice button with user interaction tracking
+  Widget _buildVoiceButton(BotProvider bot, SettingsProvider settings) {
+    return GestureDetector(
       onTap: () {
+        settings.onUserInteraction();
         if (bot.isConnected) {
           bot.toggleListening();
         }
       },
+      child: VoiceButton(
+        isListening: bot.isListening,
+        isConnected: bot.isConnected,
+        onTap: () {
+          settings.onUserInteraction();
+          if (bot.isConnected) {
+            bot.toggleListening();
+          }
+        },
+      ),
     );
   }
 
   /// Bottom buttons
   Widget _buildBottomButtons(BotProvider bot) {
-    return Row(
-      mainAxisAlignment: MainAxisAlignment.center,
-      children: [
-        // Auto Voice Mode
-        _buildIconButton(
-          icon: bot.autoVoiceMode ? Icons.mic : Icons.mic_off,
-          label: 'Auto Mode',
-          color: bot.autoVoiceMode ? Colors.greenAccent : Colors.white54,
-          isActive: bot.autoVoiceMode,
-          onTap: () {
-            bot.toggleAutoVoiceMode();
-          },
-        ),
-
-        SizedBox(width: 40),
-
-        // Settings
-        _buildIconButton(
-          icon: Icons.settings,
-          label: 'Settings',
-          onTap: () {
-            // TODO: Open settings
-          },
-        ),
-
-        SizedBox(width: 40),
-
-        // Clear messages
-        _buildIconButton(
-          icon: Icons.delete_outline,
-          label: 'Clear',
-          onTap: () {
-            bot.clearMessages();
-          },
-        ),
-      ],
-    );
-  }
-
-  /// Icon button widget
-  Widget _buildIconButton({
-    required IconData icon,
-    required String label,
-    required VoidCallback onTap,
-    Color? color,
-    bool isActive = false,
-  }) {
-    return InkWell(
-      onTap: onTap,
-      child: Column(
+    return Padding(
+      padding: EdgeInsets.symmetric(horizontal: 32),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceEvenly,
         children: [
-          Container(
-            padding: EdgeInsets.all(isActive ? 12 : 0),
-            decoration: isActive
-                ? BoxDecoration(
-                    shape: BoxShape.circle,
-                    color: Colors.greenAccent.withOpacity(0.2),
-                    border: Border.all(color: Colors.greenAccent, width: 2),
-                  )
-                : null,
-            child: Icon(icon, color: color ?? Colors.white54, size: 24),
+          // Auto voice mode toggle
+          _buildActionButton(
+            icon: bot.autoVoiceMode ? Icons.mic_off : Icons.mic,
+            label: bot.autoVoiceMode ? 'Tắt Auto' : 'Bật Auto',
+            onPressed: bot.isConnected ? () => bot.toggleAutoVoiceMode() : null,
+            color: bot.autoVoiceMode ? Colors.red : Colors.green,
           ),
-          SizedBox(height: 4),
-          Text(
-            label,
-            style: TextStyle(
-              color: color ?? Colors.white54,
-              fontSize: 12,
-              fontWeight: isActive ? FontWeight.bold : FontWeight.normal,
-            ),
+
+          // Clear messages
+          _buildActionButton(
+            icon: Icons.delete_outline,
+            label: 'Xóa',
+            onPressed: bot.messages.isNotEmpty
+                ? () => bot.clearMessages()
+                : null,
+            color: Colors.grey,
           ),
         ],
       ),
     );
   }
 
+  Widget _buildActionButton({
+    required IconData icon,
+    required String label,
+    required VoidCallback? onPressed,
+    required Color color,
+  }) {
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final isSmallScreen = MediaQuery.of(context).size.height < 700;
+
+        return InkWell(
+          onTap: onPressed,
+          child: Container(
+            padding: EdgeInsets.symmetric(
+              horizontal: isSmallScreen ? 16 : 20,
+              vertical: isSmallScreen ? 10 : 12,
+            ),
+            decoration: BoxDecoration(
+              color: onPressed != null
+                  ? color.withOpacity(0.2)
+                  : Colors.grey.withOpacity(0.1),
+              borderRadius: BorderRadius.circular(isSmallScreen ? 16 : 20),
+              border: Border.all(
+                color: onPressed != null ? color : Colors.grey.shade800,
+                width: 2,
+              ),
+            ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(
+                  icon,
+                  color: onPressed != null ? color : Colors.grey.shade700,
+                  size: isSmallScreen ? 18 : 20,
+                ),
+                SizedBox(width: isSmallScreen ? 6 : 8),
+                Text(
+                  label,
+                  style: TextStyle(
+                    color: onPressed != null ? color : Colors.grey.shade700,
+                    fontWeight: FontWeight.bold,
+                    fontSize: isSmallScreen ? 13 : 14,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
   /// Activation overlay
   Widget _buildActivationOverlay(BotProvider bot) {
     return Container(
-      color: Colors.black87,
+      color: Colors.black.withOpacity(0.9),
       child: Center(
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Icon(Icons.lock_outline, color: Colors.white, size: 80)
-                .animate(onPlay: (controller) => controller.repeat())
-                .scale(duration: 1000.ms)
-                .then()
-                .scale(begin: Offset(1.2, 1.2), end: Offset(1.0, 1.0)),
-
-            SizedBox(height: 40),
-
-            Text(
-              'Device Activation Required',
-              style: TextStyle(
-                color: Colors.white,
-                fontSize: 24,
-                fontWeight: FontWeight.bold,
-              ),
+        child: Container(
+          margin: EdgeInsets.all(32),
+          padding: EdgeInsets.all(32),
+          decoration: BoxDecoration(
+            gradient: LinearGradient(
+              colors: [Colors.blue.shade900, Colors.purple.shade900],
             ),
-
-            SizedBox(height: 20),
-
-            if (bot.activationCode != null) ...[
-              Text(
-                'Enter this code at',
-                style: TextStyle(color: Colors.white70, fontSize: 16),
+            borderRadius: BorderRadius.circular(24),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.blue.withOpacity(0.5),
+                blurRadius: 30,
+                spreadRadius: 10,
               ),
-
-              SizedBox(height: 8),
-
+            ],
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(Icons.qr_code_2, size: 80, color: Colors.white),
+              SizedBox(height: 24),
               Text(
-                'xiaozhi.me/console',
+                'Kích hoạt Bot',
                 style: TextStyle(
-                  color: Colors.blue,
-                  fontSize: 18,
+                  color: Colors.white,
+                  fontSize: 28,
                   fontWeight: FontWeight.bold,
                 ),
               ),
-
-              SizedBox(height: 30),
-
-              Container(
-                    padding: EdgeInsets.symmetric(horizontal: 40, vertical: 20),
-                    decoration: BoxDecoration(
-                      color: Colors.white.withOpacity(0.1),
-                      borderRadius: BorderRadius.circular(16),
-                      border: Border.all(color: Colors.white30),
-                    ),
-                    child: Text(
-                      bot.activationCode!.split('').join('  '),
-                      style: TextStyle(
-                        color: Colors.white,
-                        fontSize: 32,
-                        fontWeight: FontWeight.bold,
-                        letterSpacing: 8,
-                      ),
-                    ),
-                  )
-                  .animate(onPlay: (controller) => controller.repeat())
-                  .shimmer(duration: 2000.ms, color: Colors.white24),
-
-              SizedBox(height: 40),
-
+              SizedBox(height: 16),
               Text(
-                    'Waiting for activation...',
-                    style: TextStyle(color: Colors.white54, fontSize: 14),
+                'Quét mã QR bằng ứng dụng Xiaozhi hoặc nhập mã sau:',
+                style: TextStyle(color: Colors.white70, fontSize: 14),
+                textAlign: TextAlign.center,
+              ),
+              SizedBox(height: 24),
+              Container(
+                padding: EdgeInsets.all(20),
+                decoration: BoxDecoration(
+                  color: Colors.white,
+                  borderRadius: BorderRadius.circular(16),
+                ),
+                child: Text(
+                  bot.activationCode ?? 'Loading...',
+                  style: TextStyle(
+                    color: Colors.black,
+                    fontSize: 32,
+                    fontWeight: FontWeight.bold,
+                    letterSpacing: 8,
+                  ),
+                ),
+              ),
+              SizedBox(height: 24),
+              Container(
+                    padding: EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                    decoration: BoxDecoration(
+                      color: Colors.white.withOpacity(0.2),
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        SizedBox(
+                          width: 16,
+                          height: 16,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 2,
+                            valueColor: AlwaysStoppedAnimation(Colors.white),
+                          ),
+                        ),
+                        SizedBox(width: 12),
+                        Text(
+                          'Đang chờ kích hoạt...',
+                          style: TextStyle(color: Colors.white, fontSize: 14),
+                        ),
+                      ],
+                    ),
                   )
                   .animate(onPlay: (controller) => controller.repeat())
                   .fadeIn(duration: 1000.ms)
                   .then()
                   .fadeOut(duration: 1000.ms),
             ],
-          ],
+          ),
         ),
       ),
     );

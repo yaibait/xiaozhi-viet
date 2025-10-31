@@ -65,7 +65,8 @@ dependencies:
 
   # MQTT (optional)
   mqtt_client: ^10.2.0
-
+  screen_brightness: ^2.1.7
+  wakelock_plus: ^1.4.0
 dev_dependencies:
   flutter_test:
     sdk: flutter

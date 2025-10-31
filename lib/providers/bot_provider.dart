@@ -83,38 +83,85 @@ class BotProvider extends ChangeNotifier {
   bool get isSpeaking => _state == BotState.speaking;
   bool get autoVoiceMode => _autoVoiceMode;
   bool get isMonitoringVoice => _isMonitoringVoice;
-  VadService get vadService => _vadService;
-  AudioService get audioService => _audioService;
+
+  // Bot mode
+  String _botMode = 'mybot'; // 'demo' or 'mybot'
+  String get botMode => _botMode;
+  bool get isDemoMode => _botMode == 'demo';
+
   // ============================================================================
   // Initialization
   // ============================================================================
 
-  Future<void> initialize({String? deviceId, String? clientId}) async {
+  /// Initialize with mode: 'demo' or 'mybot'
+  Future<void> initialize({
+    String? deviceId,
+    String? clientId,
+    String mode = 'mybot',
+  }) async {
     try {
-      _logger.i('🤖 Initializing bot...');
+      _logger.i('🤖 Initializing bot (mode: $mode)...');
+      _botMode = mode;
+
       final prefs = await SharedPreferences.getInstance();
 
-      final savedDeviceId = prefs.getString('device_id');
-      final savedClientId = prefs.getString('client_id');
-      final serial_number = prefs.getString('serial_number');
-      final hmacKey = prefs.getString('hmac_key');
-      final finalDeviceId = deviceId ?? savedDeviceId ?? _generateDeviceId();
-      final finalClientId = clientId ?? savedClientId ?? _generateClientId();
-      final finalserialNumber =
-          serial_number ?? serial_number ?? generateSerialFromUuid();
-      final finalHmacKey = hmacKey ?? hmacKey ?? _generateHmacKey();
+      // Check if user has activated their own bot
+      final hasActivatedOwnBot =
+          prefs.getBool('has_activated_own_bot') ?? false;
 
-      if (savedDeviceId == null) {
-        await prefs.setString('device_id', finalDeviceId);
+      // If user has activated own bot, force mybot mode
+      if (hasActivatedOwnBot && mode == 'demo') {
+        _logger.i('⚠️ User has activated own bot, switching to mybot mode');
+        _botMode = 'mybot';
+        mode = 'mybot';
       }
-      if (savedClientId == null) {
-        await prefs.setString('client_id', finalClientId);
+
+      String finalDeviceId;
+      String finalClientId;
+      String finalSerialNumber;
+      String finalHmacKey;
+
+      if (mode == 'demo') {
+        // ✅ DEMO MODE - Use fixed credentials
+        _logger.i('🎮 Using DEMO bot credentials');
+        finalDeviceId = '1a:a6:1d:33:d8:5c';
+        finalClientId = '6497ff47-d223-4c32-93af-068469f818c8';
+        finalSerialNumber = 'DEMO-BOT-001';
+        finalHmacKey = _generateHmacKey(); // Generate temp key
+
+        // Don't save demo credentials
+      } else {
+        // ✅ MY BOT MODE - Use saved or generated credentials
+        _logger.i('👤 Using MY bot credentials');
+        final savedDeviceId = prefs.getString('device_id');
+        final savedClientId = prefs.getString('client_id');
+        final serialNumber = prefs.getString('serial_number');
+        final hmacKey = prefs.getString('hmac_key');
+
+        finalDeviceId = deviceId ?? savedDeviceId ?? _generateDeviceId();
+        finalClientId = clientId ?? savedClientId ?? _generateClientId();
+        finalSerialNumber = serialNumber ?? generateSerialFromUuid();
+        finalHmacKey = hmacKey ?? _generateHmacKey();
+
+        // Save my bot credentials
+        if (savedDeviceId == null) {
+          await prefs.setString('device_id', finalDeviceId);
+        }
+        if (savedClientId == null) {
+          await prefs.setString('client_id', finalClientId);
+        }
+        if (serialNumber == null) {
+          await prefs.setString('serial_number', finalSerialNumber);
+        }
+        if (hmacKey == null) {
+          await prefs.setString('hmac_key', finalHmacKey);
+        }
       }
 
       _config = XiaozhiConfig(
         deviceId: finalDeviceId,
         clientId: finalClientId,
-        serialNumber: finalserialNumber,
+        serialNumber: finalSerialNumber,
         hmacKey: finalHmacKey,
       );
 
@@ -123,19 +170,31 @@ class BotProvider extends ChangeNotifier {
 
       _setupWebSocketCallbacks();
 
-      _logger.i('📡 Checking activation status...');
-      final response = await _activationService!.checkOtaStatus();
-
-      if (response.needsActivation) {
-        _activationCode = response.verificationCode;
-        _isActivated = false;
-        _updateEmotion(BotEmotion.neutral);
-        _logger.i('🔑 Need activation: $_activationCode');
-        _startActivation();
-      } else {
+      if (mode == 'demo') {
+        // ✅ DEMO MODE - Skip activation check, connect directly
+        _logger.i('🎮 Demo mode: Skipping activation, connecting directly...');
         _isActivated = true;
-        _logger.i('✅ Already activated');
         await connect();
+      } else {
+        // ✅ MY BOT MODE - Check activation status
+        _logger.i('📡 Checking activation status...');
+        final response = await _activationService!.checkOtaStatus();
+
+        if (response.needsActivation) {
+          _activationCode = response.verificationCode;
+          _isActivated = false;
+          _updateEmotion(BotEmotion.neutral);
+          _logger.i('🔑 Need activation: $_activationCode');
+          _startActivation();
+        } else {
+          _isActivated = true;
+          _logger.i('✅ Already activated');
+
+          // Mark that user has activated own bot
+          await prefs.setBool('has_activated_own_bot', true);
+
+          await connect();
+        }
       }
 
       _audioService.init();
@@ -182,6 +241,49 @@ class BotProvider extends ChangeNotifier {
 
   String _generateClientId() {
     return uuid.v4().toLowerCase();
+  }
+
+  // ============================================================================
+  // Bot Mode Management
+  // ============================================================================
+
+  /// Check if user can switch back to demo mode
+  Future<bool> canSwitchToDemo() async {
+    final prefs = await SharedPreferences.getInstance();
+    return !(prefs.getBool('has_activated_own_bot') ?? false);
+  }
+
+  /// Switch to My Bot mode
+  Future<void> switchToMyBot() async {
+    _logger.i('🔄 Switching to My Bot mode...');
+
+    // Disconnect current connection
+    await disconnect();
+
+    // Clear demo mode
+    _botMode = 'mybot';
+
+    // Reinitialize with mybot mode
+    await initialize(mode: 'mybot');
+  }
+
+  /// Switch to Demo mode (only if user hasn't activated own bot)
+  Future<void> switchToDemo() async {
+    if (!await canSwitchToDemo()) {
+      _logger.w('⚠️ Cannot switch to demo - user has activated own bot');
+      return;
+    }
+
+    _logger.i('🔄 Switching to Demo mode...');
+
+    // Disconnect current connection
+    await disconnect();
+
+    // Set demo mode
+    _botMode = 'demo';
+
+    // Reinitialize with demo mode
+    await initialize(mode: 'demo');
   }
 
   /// Setup WebSocket callbacks
@@ -287,6 +389,7 @@ class BotProvider extends ChangeNotifier {
               '🔄 Auto mode: Bot finished speaking, ready for next input',
             );
             _vadService.reset();
+            _autoStartListening();
           }
         }
       }
@@ -298,11 +401,13 @@ class BotProvider extends ChangeNotifier {
       _logger.d(
         '🔊 VAD Event: $event (state: $_state, autoMode: $_autoVoiceMode)',
       );
+
       // ✅ CRITICAL: Skip nếu auto mode đang bật (auto listener sẽ xử lý)
       if (_autoVoiceMode) {
         _logger.d('⏭️ Auto mode active, skipping manual VAD handler');
         return;
       }
+
       if (event == VadEvent.speechStart) {
         _logger.d('🎤 Speech started');
 
